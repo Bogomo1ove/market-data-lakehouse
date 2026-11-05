@@ -1,5 +1,5 @@
 requests
 python-dotenv
-pandas
+polars
 pyarrow
 pytest

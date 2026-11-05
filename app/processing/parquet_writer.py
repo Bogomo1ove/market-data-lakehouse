@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 
 
 def write_to_parquet(
@@ -8,7 +8,7 @@ def write_to_parquet(
     file_path: str | Path
 ) -> None:
     """
-    Преобразует исторические котировки
+    Преобразует исторические дневные котировки
     и сохраняет их в формате Parquet.
     """
 
@@ -16,7 +16,7 @@ def write_to_parquet(
         raise ValueError("Нет данных для сохранения")
 
     # Создаём DataFrame
-    df = pd.DataFrame(records)
+    df = pl.from_dicts(records)
 
     # Проверяем обязательные колонки
     required_columns = {
@@ -36,44 +36,34 @@ def write_to_parquet(
             f"Отсутствуют обязательные колонки: {missing_columns}"
         )
 
-    # Преобразуем дату
-    df["datetime"] = pd.to_datetime(
-        df["datetime"],
-        errors="raise"
+    # Преобразуем типы данных
+    df = df.with_columns(
+        pl.col("datetime").str.to_date(
+            "%Y-%m-%d",
+            strict=True
+        ),
+        pl.col("open").cast(pl.Float64, strict=True),
+        pl.col("high").cast(pl.Float64, strict=True),
+        pl.col("low").cast(pl.Float64, strict=True),
+        pl.col("close").cast(pl.Float64, strict=True),
+        pl.col("volume").cast(pl.Int64, strict=True)
     )
 
-    # Преобразуем цены в числовой формат
-    price_columns = ["open", "high", "low", "close"]
-
-    for column in price_columns:
-        df[column] = pd.to_numeric(
-            df[column],
-            errors="raise"
-        ).astype("float64")
-
-    # Преобразуем объём торгов в целое число
-    df["volume"] = pd.to_numeric(
-        df["volume"],
-        errors="raise"
-    ).astype("Int64")
-
-    # Сортируем данные
-    df = df.sort_values("datetime")
+    # Сортируем по дате
+    df = df.sort("datetime")
 
     # Подготавливаем путь
     file_path = Path(file_path)
 
-    # Создаём директории, если их нет
     file_path.parent.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    # Сохраняем данные
-    df.to_parquet(
+    # Сохраняем Parquet
+    df.write_parquet(
         file_path,
-        engine="pyarrow",
-        index=False
+        compression="zstd"
     )
 
-    print(f"Сохранено {len(df)} записей в {file_path}")
+    print(f"Сохранено {df.height} записей в {file_path}")

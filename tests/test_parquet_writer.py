@@ -1,11 +1,11 @@
-import pandas as pd
+import pytest
+import polars as pl
 
 from app.processing.parquet_writer import write_to_parquet
 
 
 def test_write_to_parquet(tmp_path):
 
-    # Подготавливаем тестовые данные
     records = [
         {
             "symbol": "AAPL",
@@ -18,10 +18,8 @@ def test_write_to_parquet(tmp_path):
         }
     ]
 
-    # Путь к временному файлу
     file_path = tmp_path / "test_prices.parquet"
 
-    # Сохраняем данные
     write_to_parquet(
         records=records,
         file_path=file_path
@@ -30,26 +28,23 @@ def test_write_to_parquet(tmp_path):
     # Проверяем существование файла
     assert file_path.exists()
 
-    # Читаем сохранённый Parquet
-    df = pd.read_parquet(file_path)
+    # Читаем Parquet через Polars
+    df = pl.read_parquet(file_path)
 
     # Проверяем количество строк
-    assert len(df) == 1
+    assert df.height == 1
 
     # Проверяем значения
-    assert df.iloc[0]["symbol"] == "AAPL"
+    assert df["symbol"][0] == "AAPL"
 
-    assert df.iloc[0]["close"] == 272.00
+    assert df["close"][0] == 272.00
 
-    # Проверяем типы данных
-    assert pd.api.types.is_float_dtype(df["close"])
+    # Проверяем типы
+    assert df.schema["datetime"] == pl.Date
 
-    assert pd.api.types.is_integer_dtype(df["volume"])
+    assert df.schema["close"] == pl.Float64
 
-    assert pd.api.types.is_datetime64_any_dtype(df["datetime"])
-
-
-import pytest
+    assert df.schema["volume"] == pl.Int64
 
 
 def test_write_to_parquet_empty_records(tmp_path):
