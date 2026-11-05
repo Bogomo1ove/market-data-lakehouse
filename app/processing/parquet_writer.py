@@ -1,7 +1,9 @@
 from pathlib import Path
-
+import logging
 import polars as pl
 
+
+logger = logging.getLogger(__name__)
 
 def write_to_parquet(
     records: list[dict],
@@ -66,4 +68,8 @@ def write_to_parquet(
         compression="zstd"
     )
 
-    print(f"Сохранено {df.height} записей в {file_path}")
+    logger.info(
+        "Parquet сохранён: path=%s, rows=%s",
+        file_path,
+        df.height
+    )
