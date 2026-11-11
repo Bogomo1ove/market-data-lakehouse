@@ -1,9 +1,15 @@
 import logging
 import time
 
+import polars as pl
+import requests
+
 from app.common.config import BASE_DIR
 from app.common.logger import setup_logging
-from app.ingestion.client import TwelveDataClient
+from app.ingestion.client import (
+    TwelveDataClient,
+    TwelveDataAPIError
+)
 from app.ingestion.historical_loader import load_historical_data
 from app.processing.parquet_writer import write_to_parquet
 
@@ -12,10 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 SYMBOLS = ["AAPL", "MSFT", "NVDA"]
-
 INTERVAL = "1day"
-
 OUTPUTSIZE = 100
+
+
+class PipelineExecutionError(Exception):
+    """Ошибка частичного или полного выполнения pipeline."""
 
 
 def run_pipeline(
@@ -24,6 +32,17 @@ def run_pipeline(
     outputsize: int
 ) -> None:
 
+    # Проверяем входные данные
+    if not symbols:
+        raise ValueError("Список инструментов не должен быть пустым")
+
+    # Засекаем время выполнения
+    pipeline_start = time.perf_counter()
+
+    # Создаём списки успешных и неудачных загрузок
+    successful_symbols = []
+    failed_symbols = []
+
     logger.info(
         "Запуск pipeline: symbols=%s, interval=%s, outputsize=%s",
         symbols,
@@ -31,11 +50,17 @@ def run_pipeline(
         outputsize
     )
 
-    pipeline_start = time.perf_counter()
-
-    client = TwelveDataClient()
+    # Создаём HTTP-клиент с поддержкой Retry
+    client = TwelveDataClient(
+        timeout=10,
+        max_retries=2,
+        backoff_factor=1.0,
+        max_retry_delay=30.0
+    )
 
     try:
+
+        # Последовательно обрабатываем инструменты
         for symbol in symbols:
 
             symbol_start = time.perf_counter()
@@ -46,7 +71,8 @@ def run_pipeline(
             )
 
             try:
-                # Загружаем котировки
+
+                # Получаем исторические данные
                 records = load_historical_data(
                     client=client,
                     symbol=symbol,
@@ -60,7 +86,7 @@ def run_pipeline(
                     len(records)
                 )
 
-                # Формируем путь к файлу
+                # Формируем путь для сохранения
                 file_path = (
                     BASE_DIR
                     / "data"
@@ -68,18 +94,33 @@ def run_pipeline(
                     / f"{symbol}_{interval}.parquet"
                 )
 
-                # Сохраняем данные
+                # Сохраняем данные в Parquet
                 write_to_parquet(
                     records=records,
                     file_path=file_path
                 )
 
-            except Exception:
+            # Обрабатываем ошибки отдельного инструмента
+            except (
+                requests.RequestException,
+                TwelveDataAPIError,
+                ValueError,
+                pl.exceptions.PolarsError,
+                OSError
+            ):
+
                 logger.exception(
                     "Ошибка обработки инструмента: symbol=%s",
                     symbol
                 )
-                raise
+
+                failed_symbols.append(symbol)
+
+                # Продолжаем загрузку остальных инструментов
+                continue
+
+            # Если ошибок не было, отмечаем успех
+            successful_symbols.append(symbol)
 
             duration = time.perf_counter() - symbol_start
 
@@ -89,17 +130,31 @@ def run_pipeline(
                 duration
             )
 
+    # Закрываем HTTP-сессию
     finally:
+
         client.close()
 
         logger.info("HTTP-сессия закрыта")
 
+    # Рассчитываем общее время выполнения
     total_duration = time.perf_counter() - pipeline_start
 
     logger.info(
-        "Pipeline успешно завершён: duration=%.2f sec",
+        "Результат pipeline: successful=%s, failed=%s, duration=%.2f sec",
+        successful_symbols,
+        failed_symbols,
         total_duration
     )
+
+    # Проверяем, были ли неудачные загрузки
+    if failed_symbols:
+
+        raise PipelineExecutionError(
+            f"Не удалось обработать инструменты: {failed_symbols}"
+        )
+
+    logger.info("Pipeline успешно завершён")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 from unittest.mock import Mock
-
+from unittest.mock import call
+from app.ingestion import client as client_module
 import pytest
 import requests
-
 from app.common.config import API_KEY, API_BASE_URL
 from app.ingestion.client import (
     TwelveDataClient,
@@ -155,3 +155,209 @@ def test_get_time_series_timeout(client, monkeypatch):
         client.get_time_series(
             symbol="AAPL"
         )
+
+@pytest.fixture
+def retry_client():
+
+    api_client = TwelveDataClient(
+        timeout=3,
+        max_retries=2
+    )
+
+    yield api_client
+
+    api_client.close()
+
+def fake_response(
+    status_code: int,
+    data: dict | None = None,
+    headers: dict | None = None
+):
+    response = Mock()
+
+    response.status_code = status_code
+    response.headers = headers or {}
+
+    response.json.return_value = (
+        data
+        if data is not None
+        else {"status": "ok", "values": []}
+    )
+
+    if status_code >= 400:
+        response.raise_for_status.side_effect = (
+            requests.HTTPError(f"HTTP {status_code}")
+        )
+
+    return response
+
+def test_timeout_then_success(retry_client, monkeypatch):
+
+    mock_get = Mock(
+        side_effect=[
+            requests.Timeout("Timeout 1"),
+            requests.Timeout("Timeout 2"),
+            fake_response(200)
+        ]
+    )
+
+    mock_sleep = Mock()
+
+    monkeypatch.setattr(
+        retry_client.session,
+        "get",
+        mock_get
+    )
+
+    monkeypatch.setattr(
+        client_module.time,
+        "sleep",
+        mock_sleep
+    )
+
+    result = retry_client.get_time_series(
+        symbol="AAPL"
+    )
+
+    assert result["status"] == "ok"
+
+    assert mock_get.call_count == 3
+
+    assert mock_sleep.call_args_list == [
+        call(1.0),
+        call(2.0)
+    ]
+
+def test_http_503_then_success(retry_client, monkeypatch):
+
+    mock_get = Mock(
+        side_effect=[
+            fake_response(503),
+            fake_response(200)
+        ]
+    )
+
+    mock_sleep = Mock()
+
+    monkeypatch.setattr(
+        retry_client.session,
+        "get",
+        mock_get
+    )
+
+    monkeypatch.setattr(
+        client_module.time,
+        "sleep",
+        mock_sleep
+    )
+
+    retry_client.get_time_series(
+        symbol="AAPL"
+    )
+
+    assert mock_get.call_count == 2
+
+    mock_sleep.assert_called_once_with(1.0)
+
+def test_http_429_retry_after(retry_client, monkeypatch):
+
+    mock_get = Mock(
+        side_effect=[
+            fake_response(
+                429,
+                headers={"Retry-After": "5"}
+            ),
+            fake_response(200)
+        ]
+    )
+
+    mock_sleep = Mock()
+
+    monkeypatch.setattr(
+        retry_client.session,
+        "get",
+        mock_get
+    )
+
+    monkeypatch.setattr(
+        client_module.time,
+        "sleep",
+        mock_sleep
+    )
+
+    retry_client.get_time_series(
+        symbol="AAPL"
+    )
+
+    assert mock_get.call_count == 2
+
+    mock_sleep.assert_called_once_with(5.0)
+
+def test_http_429_without_retry_after(retry_client, monkeypatch):
+
+    mock_get = Mock(
+        return_value=fake_response(429)
+    )
+
+    mock_sleep = Mock()
+
+    monkeypatch.setattr(
+        retry_client.session,
+        "get",
+        mock_get
+    )
+
+    monkeypatch.setattr(
+        client_module.time,
+        "sleep",
+        mock_sleep
+    )
+
+    with pytest.raises(
+        requests.HTTPError,
+        match="429"
+    ):
+        retry_client.get_time_series(
+            symbol="AAPL"
+        )
+
+    assert mock_get.call_count == 1
+
+    mock_sleep.assert_not_called()
+
+def test_timeout_retries_exhausted(retry_client, monkeypatch):
+
+    mock_get = Mock(
+        side_effect=requests.Timeout(
+            "Still unavailable"
+        )
+    )
+
+    mock_sleep = Mock()
+
+    monkeypatch.setattr(
+        retry_client.session,
+        "get",
+        mock_get
+    )
+
+    monkeypatch.setattr(
+        client_module.time,
+        "sleep",
+        mock_sleep
+    )
+
+    with pytest.raises(
+        requests.Timeout,
+        match="Still unavailable"
+    ):
+        retry_client.get_time_series(
+            symbol="AAPL"
+        )
+
+    assert mock_get.call_count == 3
+
+    assert mock_sleep.call_args_list == [
+        call(1.0),
+        call(2.0)
+    ]
